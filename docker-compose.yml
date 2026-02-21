@@ -1,0 +1,106 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # SQL Server 2022
+  # Provides the database backend for the API.
+  # ---------------------------------------------------------------------------
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      # SA password must satisfy SQL Server complexity rules:
+      #   at least 8 chars, uppercase, lowercase, digit and symbol.
+      MSSQL_SA_PASSWORD: "Admin@1234"
+    ports:
+      # Expose 1433 on the host so you ct with SSMS / Azure Data Studio
+      # during development. Remove this mapping in production.
+      - "1433:1433"
+    volumes:
+      # Named volume keeps database files between 'docker compose down' runs.
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      # Wait until SQL Server is ready to accept connections before the API starts.
+      # -C trusts the self-signed TLS cert inside the container.
+      test:
+        [
+          "CMD",
+          "/opt/mssql-tools18/bin/sqlcmd",
+          "-S", "localhost",
+          "-U", "sa",
+          "-P", "Admin@1234",
+          "-C",
+          "-Q", "SELECT 1"
+        ]
+      interval: 10s      # check every 10 seconds
+      timeout: 5s        # fail the check if it takes longer than 5 s
+      retries: 10        # try up to 10 times before marking unhealthy
+      start_period: 30s  # give SQL Server 30 s to start before counting retries
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # In-memory data store used by the API for caching / session state.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      # Expose 6379 on the host for local tooling (e.g. RedisInsight).
+      # Remove this mapping in production.
+      - "6379:6379"
+    volumes:
+      # Named volume keeps Redis data between 'docker compose down' runs.
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # .NET 8 API
+  # Built from the Dockerfile at the repository root.
+  # Won't start until sqlserver and redis pass their healthchecks.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api
+    depends_on:
+      sqlserver:
+        condition: service_healthy   # wait for the healthcheck above to pass
+      redis:
+        condition: service_healthy   # wait for Redis to be ready
+    environment:
+      # Run in Development mode so Swagger UI is served at /swagger
+      ASPNETCORE_ENVIRONMENT: Development
+
+      # Listen on HTTP inside the container (HTTPS handled externally)
+      ASPNETCORE_URLS: http://+:8080
+
+      # Override the Windows-auction string in appsettings.json.
+      # 'sqlserver' resolves to the SQL Server container via Docker's internal DNS.
+      ConnectionStrings__DefaultConnection: >-
+        Server=sqlserver,1433;Database=MyDb;
+        User Id=sa;Password=Admin@1234;
+        TrustServerCertificate=True;
+
+      # Redis connection string — 'redis' resolves to the Redis container via Docker's internal DNS.
+      Redis__ConnectionString: "redis:6379"
+
+      # Override the JWT secret so it isn't baked into the image
+      JwtSettings__SecretKey: "YourSuperSecretKeyForJWTTokenGeneration123456789"
+      JwtSettings__Issuer: "api-project"
+      JwtSettings__Audience: "api-projectClients"
+    ports:
+      # Map container port 8080 → host port 8080
+      - "8080:8080"
+
+# ---------------------------------------------------------------------------
+# Named volumes
+# ---------------------------------------------------------------------------
+volumes:
+  sqlserver_data:
+  redis_data:
